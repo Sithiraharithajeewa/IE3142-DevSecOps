@@ -8,7 +8,14 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
+
+  # ============================================================
+  # 1. SAST - Semgrep
+  # ============================================================
   sast:
     name: SAST - Semgrep
     runs-on: ubuntu-latest
@@ -29,8 +36,15 @@ jobs:
 
       - name: Run Semgrep SAST
         run: |
-          semgrep --config p/java --error application/WebGoat/src/main/java
+          semgrep \
+            --config p/java \
+            --error \
+            application/WebGoat/src/main/java
 
+
+  # ============================================================
+  # 2. Build and Test
+  # ============================================================
   build-and-test:
     name: Build and Test WebGoat
     runs-on: ubuntu-latest
@@ -53,3 +67,106 @@ jobs:
       - name: Build and test
         working-directory: application/WebGoat
         run: ./mvnw -B clean verify
+
+
+  # ============================================================
+  # 3. Dependency / Software Composition Analysis
+  # ============================================================
+  dependency-scan:
+    name: Dependency Scan - OWASP Dependency Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Java 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+
+      - name: Make Maven wrapper executable
+        working-directory: application/WebGoat
+        run: chmod +x mvnw
+
+      - name: Run OWASP Dependency Check
+        working-directory: application/WebGoat
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+        run: |
+          ./mvnw -B verify -Powasp \
+            -DnvdApiKeyEnvironmentVariable=NVD_API_KEY
+
+
+  # ============================================================
+  # 4. Secrets Scanning - Gitleaks
+  # ============================================================
+  secrets-scan:
+    name: Secrets Scan - Gitleaks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+
+  # ============================================================
+  # 5. Docker Build + Trivy Container Scan
+  # ============================================================
+  container-security:
+    name: Container Security - Docker + Trivy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Java 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+
+      - name: Make Maven wrapper executable
+        working-directory: application/WebGoat
+        run: chmod +x mvnw
+
+      - name: Build WebGoat JAR
+        working-directory: application/WebGoat
+        run: ./mvnw -B -DskipTests package
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            -t ie3142-webgoat:ci \
+            -f application/WebGoat/Dockerfile \
+            application/WebGoat
+
+      - name: Install Trivy
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget gnupg
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key \
+            | gpg --dearmor \
+            | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
+          echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" \
+            | sudo tee /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update
+          sudo apt-get install -y trivy
+
+      - name: Run Trivy container scan
+        run: |
+          trivy image \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            ie3142-webgoat:ci
